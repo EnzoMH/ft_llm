@@ -73,6 +73,14 @@ training*.log
 eeve-awq-4bit/
 eeve-gptq-4bit/
 
+# GGUF models
+*.gguf
+vclm/vclm-korean-7b/
+vclm/vclm-korean-7b-coder-merged/
+
+# llama.cpp build
+vclm/llama.cpp/
+
 # Model checkpoints (large files)
 checkpoint-*/
 final/
