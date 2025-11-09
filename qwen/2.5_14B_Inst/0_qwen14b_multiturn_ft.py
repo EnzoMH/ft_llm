@@ -184,10 +184,10 @@ class Qwen14BFineTuningConfig:
     lora_alpha: int = 128
     lora_dropout: float = 0.05
     
-    # 학습 설정 (H100 80GB 최적화 - 속도 우선)
+    # 학습 설정 (H100 80GB 최적화 - 속도 & 안정성)
     num_train_epochs: int = 3
-    per_device_train_batch_size: int = 12  # H100 80GB 최적화: 64GB 여유
-    gradient_accumulation_steps: int = 4  # 효과적 배치: 48
+    per_device_train_batch_size: int = 8  # H100 80GB 최적화: 안정성 확보
+    gradient_accumulation_steps: int = 4  # 효과적 배치: 32
     learning_rate: float = 2e-4
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
@@ -453,7 +453,7 @@ class Qwen14BFineTuner:
             eval_dataset=eval_formatted,
             dataset_text_field="text",
             max_seq_length=self.config.max_seq_length,
-            dataset_num_proc=2,
+            dataset_num_proc=1,  # Multiprocessing 비활성화 (OOM 방지)
             packing=False,
             args=training_args,
             callbacks=[TrainingMonitorCallback()]
