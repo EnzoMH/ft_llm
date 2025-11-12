@@ -81,7 +81,9 @@ vclm/vclm-korean-7b-coder-merged/
 # llama.cpp build
 vclm/llama.cpp/
 
-qwen/2.5_14B_Inst/unsloth_compiled_cache
+# Model checkpoints (large files)
+checkpoint-*/
+final/
 
 # Environment files
 .env
@@ -92,6 +94,7 @@ qwen/2.5_14B_Inst/unsloth_compiled_cache
 
 # JSON files (except specific configs)
 *.json
+*.jsonl
 
 # Markdown files (except README)
 *.md
