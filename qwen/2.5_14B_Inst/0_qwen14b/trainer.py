@@ -60,19 +60,34 @@ class Qwen14BFineTuner:
         # 모델 로드 (Unsloth)
         logger.info("[ INFO ] 모델 다운로드 시작...")
         
-        # Flash Attention 2 사용 (H100 최적화)
-        attn_impl = "flash_attention_2" if torch.cuda.is_available() else "eager"
-        logger.info(f"[ INFO ] Attention 구현: {attn_impl}")
+        # Flash Attention 2 시도, 실패 시 Unsloth가 자동으로 fallback
+        # 현재 환경에서 Flash Attention 2가 깨져있어서 Unsloth가 자동으로 처리하도록 함
+        logger.info("[ INFO ] Attention 구현: Unsloth 자동 선택 (Flash Attention 2 실패 시 자동 fallback)")
         
-        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
-            model_name=self.config.base_model,
-            max_seq_length=self.config.max_seq_length,
-            dtype=None,  # Auto (BF16 on H100)
-            load_in_4bit=self.config.load_in_4bit,
-            load_in_8bit=self.config.load_in_8bit,
-            trust_remote_code=True,
-            attn_implementation=attn_impl
-        )
+        try:
+            # Flash Attention 2 시도
+            self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+                model_name=self.config.base_model,
+                max_seq_length=self.config.max_seq_length,
+                dtype=None,  # Auto (BF16 on H100)
+                load_in_4bit=self.config.load_in_4bit,
+                load_in_8bit=self.config.load_in_8bit,
+                trust_remote_code=True,
+                attn_implementation="flash_attention_2"  # 시도는 하지만 실패 시 Unsloth가 자동 처리
+            )
+        except Exception as e:
+            logger.warning(f"[ WARNING ] Flash Attention 2 로드 실패: {e}")
+            logger.info("[ INFO ] Unsloth가 자동으로 최적의 attention을 선택합니다...")
+            # attn_implementation 없이 재시도 (Unsloth가 자동 선택)
+            self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+                model_name=self.config.base_model,
+                max_seq_length=self.config.max_seq_length,
+                dtype=None,
+                load_in_4bit=self.config.load_in_4bit,
+                load_in_8bit=self.config.load_in_8bit,
+                trust_remote_code=True,
+                # attn_implementation 제거 - Unsloth가 자동으로 최적화
+            )
         
         logger.info("[ COMPLETE ] 베이스 모델 로드 완료")
         log_system_resources(logger, "베이스 모델 로드 후")
