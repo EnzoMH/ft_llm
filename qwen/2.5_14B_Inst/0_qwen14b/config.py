@@ -55,7 +55,7 @@ class Qwen14BFineTuningConfig:
     
     # HuggingFace Hub 업로드 (자동 백업)
     push_to_hub: bool = True  # True로 설정 시 자동 업로드
-    hub_model_id: Optional[str] = "MyeongHo0621/Qwen2.5-14B-Korean"  # 예: "username/qwen2.5-14b-korean-multiturn"
+    hub_model_id: Optional[str] = ""  # 예: "username/qwen2.5-14b-korean-multiturn"
     hub_strategy: str = "checkpoint"  # "checkpoint" (매 checkpoint마다) 또는 "end" (훈련 완료 시만)
-    hub_token: Optional[str] = "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"  # None이면 ~/.huggingface/token 사용
+    hub_token: Optional[str] = ""  # None이면 ~/.huggingface/token 사용
 
