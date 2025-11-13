@@ -4,8 +4,10 @@
 """
 
 import os
+import json
 import logging
 import torch
+import threading
 from datetime import datetime
 from transformers import TrainerCallback
 from huggingface_hub import HfApi, upload_folder
@@ -90,7 +92,7 @@ class TrainingMonitorCallback(TrainerCallback):
 
 
 class HubUploadCallback(TrainerCallback):
-    """HuggingFace Hub 자동 업로드 콜백"""
+    """HuggingFace Hub 자동 업로드 콜백 (비동기 업로드)"""
     
     def __init__(self, hub_model_id: str, hub_token: str = None, upload_every_n_steps: int = 100):
         """
@@ -103,6 +105,9 @@ class HubUploadCallback(TrainerCallback):
         self.hub_token = hub_token
         self.upload_every_n_steps = upload_every_n_steps
         self.api = HfApi(token=hub_token)
+        self.upload_thread = None  # 백그라운드 업로드 스레드
+        self.upload_lock = threading.Lock()  # 동시 업로드 방지
+        self.uploaded_checkpoints_file = None  # Hub 업로드 완료 추적 파일 경로
         
         # Hub 로그인 확인
         try:
@@ -113,33 +118,84 @@ class HubUploadCallback(TrainerCallback):
         except Exception as e:
             logger.warning(f"[ HUB ] 로그인 실패: {e}")
     
+    def _mark_checkpoint_uploaded(self, output_dir: str, step: int):
+        """Hub 업로드 완료된 checkpoint를 마커 파일에 기록"""
+        marker_file = os.path.join(output_dir, ".hub_uploaded_checkpoints.json")
+        
+        # 기존 마커 파일 읽기
+        uploaded_steps = set()
+        if os.path.exists(marker_file):
+            try:
+                with open(marker_file, 'r') as f:
+                    data = json.load(f)
+                    uploaded_steps = set(data.get('uploaded_steps', []))
+            except Exception as e:
+                logger.warning(f"[ HUB ] 마커 파일 읽기 실패: {e}")
+        
+        # 현재 step 추가
+        uploaded_steps.add(step)
+        
+        # 마커 파일 저장
+        try:
+            with open(marker_file, 'w') as f:
+                json.dump({
+                    'uploaded_steps': sorted(list(uploaded_steps)),
+                    'last_updated': datetime.now().isoformat()
+                }, f, indent=2)
+            logger.debug(f"[ HUB ] Step {step} Hub 업로드 완료 마커 저장")
+        except Exception as e:
+            logger.warning(f"[ HUB ] 마커 파일 저장 실패: {e}")
+    
+    def _upload_checkpoint_async(self, output_dir: str, checkpoint_name: str, step: int):
+        """백그라운드에서 체크포인트 업로드 (학습 블로킹 방지)"""
+        checkpoint_dir = os.path.join(output_dir, checkpoint_name)
+        
+        if not os.path.exists(checkpoint_dir):
+            return
+        
+        with self.upload_lock:
+            try:
+                logger.info(f"[ HUB ] Step {step} 체크포인트 업로드 시작 (백그라운드)...")
+                logger.info(f"[ HUB ] 체크포인트 경로: {checkpoint_dir}")
+                
+                # checkpoint-XXX 디렉토리 구조를 유지하기 위해 output_dir를 기준으로 업로드
+                # allow_patterns로 checkpoint-XXX/**만 업로드
+                self.api.upload_folder(
+                    folder_path=output_dir,  # output_dir를 기준으로
+                    repo_id=self.hub_model_id,
+                    repo_type="model",
+                    commit_message=f"Checkpoint at step {step}",
+                    allow_patterns=[f"{checkpoint_name}/**"],  # checkpoint-XXX/** 패턴만 업로드
+                )
+                
+                # Hub 업로드 완료 마커 저장
+                self._mark_checkpoint_uploaded(output_dir, step)
+                
+                logger.info(f"[ HUB ] ✅ Step {step} 체크포인트 업로드 완료 (Hub에 저장됨)")
+                logger.info(f"[ HUB ] URL: https://huggingface.co/{self.hub_model_id}/tree/main/{checkpoint_name}")
+            except Exception as e:
+                logger.error(f"[ HUB ] ❌ Step {step} 업로드 실패: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+    
     def on_save(self, args, state, control, **kwargs):
-        """체크포인트 저장 시 Hub에 업로드 (checkpoint-XXX 디렉토리 구조 유지)"""
+        """체크포인트 저장 시 Hub에 비동기 업로드 (학습 블로킹 방지)"""
         if state.global_step % self.upload_every_n_steps == 0:
-            checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
             checkpoint_name = f"checkpoint-{state.global_step}"
             
-            if os.path.exists(checkpoint_dir):
-                try:
-                    logger.info(f"[ HUB ] Step {state.global_step} 체크포인트 업로드 시작...")
-                    logger.info(f"[ HUB ] 체크포인트 경로: {checkpoint_dir}")
-                    
-                    # checkpoint-XXX 디렉토리 구조를 유지하기 위해 output_dir를 기준으로 업로드
-                    # allow_patterns로 checkpoint-XXX/**만 업로드
-                    self.api.upload_folder(
-                        folder_path=args.output_dir,  # output_dir를 기준으로
-                        repo_id=self.hub_model_id,
-                        repo_type="model",
-                        commit_message=f"Checkpoint at step {state.global_step}",
-                        allow_patterns=[f"{checkpoint_name}/**"],  # checkpoint-XXX/** 패턴만 업로드
-                    )
-                    
-                    logger.info(f"[ HUB ] ✅ Step {state.global_step} 체크포인트 업로드 완료")
-                    logger.info(f"[ HUB ] URL: https://huggingface.co/{self.hub_model_id}/tree/main/{checkpoint_name}")
-                except Exception as e:
-                    logger.error(f"[ HUB ] ❌ Step {state.global_step} 업로드 실패: {e}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
+            # 이전 업로드 스레드가 완료될 때까지 대기 (최대 1초)
+            if self.upload_thread and self.upload_thread.is_alive():
+                logger.info(f"[ HUB ] 이전 업로드 완료 대기 중...")
+                self.upload_thread.join(timeout=1.0)
+            
+            # 백그라운드 스레드에서 업로드 실행 (학습 블로킹 방지)
+            self.upload_thread = threading.Thread(
+                target=self._upload_checkpoint_async,
+                args=(args.output_dir, checkpoint_name, state.global_step),
+                daemon=True
+            )
+            self.upload_thread.start()
+            logger.info(f"[ HUB ] Step {state.global_step} 체크포인트 업로드 백그라운드 시작 (학습 계속 진행)")
     
     def on_train_end(self, args, state, control, **kwargs):
         """훈련 완료 시 최종 모델 업로드"""

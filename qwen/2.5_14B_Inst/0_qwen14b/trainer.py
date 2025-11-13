@@ -8,6 +8,7 @@ import gc
 import json
 import logging
 import torch
+from datetime import datetime
 from typing import Optional
 
 # Unsloth를 먼저 import (최적화 활성화)
@@ -491,17 +492,45 @@ class Qwen14BFineTuner:
         logger.info("[ CHECKPOINT ] 체크포인트 검색 중...")
         logger.info("="*80)
         
-        # 1. 로컬 checkpoint 확인
+        # 1. 로컬 checkpoint 확인 (Hub 업로드 완료된 것만 우선 사용)
         if os.path.exists(self.config.output_dir):
+            # Hub 업로드 완료 마커 파일 확인
+            marker_file = os.path.join(self.config.output_dir, ".hub_uploaded_checkpoints.json")
+            uploaded_steps = set()
+            if os.path.exists(marker_file):
+                try:
+                    with open(marker_file, 'r') as f:
+                        data = json.load(f)
+                        uploaded_steps = set(data.get('uploaded_steps', []))
+                    logger.info(f"[ CHECKPOINT ] Hub 업로드 완료된 체크포인트: {sorted(list(uploaded_steps))}")
+                except Exception as e:
+                    logger.warning(f"[ CHECKPOINT ] 마커 파일 읽기 실패: {e}")
+            
             checkpoints = [d for d in os.listdir(self.config.output_dir) 
                           if d.startswith("checkpoint-") and os.path.isdir(os.path.join(self.config.output_dir, d))]
             if checkpoints:
-                # 가장 최근 체크포인트 찾기
-                checkpoints.sort(key=lambda x: int(x.split("-")[1]) if x.split("-")[1].isdigit() else 0)
-                latest_checkpoint = os.path.join(self.config.output_dir, checkpoints[-1])
-                logger.info(f"[ CHECKPOINT ] ✅ 로컬 체크포인트 발견: {latest_checkpoint}")
-                logger.info(f"[ CHECKPOINT ] 학습 재개: Step {checkpoints[-1].split('-')[1]}")
-                return latest_checkpoint
+                # Hub 업로드 완료된 checkpoint 우선 선택
+                uploaded_checkpoints = [c for c in checkpoints 
+                                       if int(c.split("-")[1]) in uploaded_steps] if uploaded_steps else []
+                
+                if uploaded_checkpoints:
+                    # Hub 업로드 완료된 것 중 가장 최근 것 선택
+                    uploaded_checkpoints.sort(key=lambda x: int(x.split("-")[1]) if x.split("-")[1].isdigit() else 0)
+                    latest_checkpoint = os.path.join(self.config.output_dir, uploaded_checkpoints[-1])
+                    step_num = uploaded_checkpoints[-1].split('-')[1]
+                    logger.info(f"[ CHECKPOINT ] ✅ Hub 업로드 완료된 체크포인트 발견: {latest_checkpoint}")
+                    logger.info(f"[ CHECKPOINT ] 학습 재개: Step {step_num} (Hub에 저장됨, 안전하게 재개 가능)")
+                    return latest_checkpoint
+                else:
+                    # Hub 업로드 완료되지 않은 checkpoint는 경고
+                    checkpoints.sort(key=lambda x: int(x.split("-")[1]) if x.split("-")[1].isdigit() else 0)
+                    latest_checkpoint = os.path.join(self.config.output_dir, checkpoints[-1])
+                    step_num = checkpoints[-1].split('-')[1]
+                    logger.warning(f"[ CHECKPOINT ] ⚠️  로컬 체크포인트 발견 (Hub 업로드 미완료): {latest_checkpoint}")
+                    logger.warning(f"[ CHECKPOINT ] ⚠️  Step {step_num}는 Hub에 업로드되지 않았습니다.")
+                    logger.warning(f"[ CHECKPOINT ] ⚠️  Hub 업로드 완료된 체크포인트를 사용하는 것을 권장합니다.")
+                    logger.info(f"[ CHECKPOINT ] 로컬 체크포인트로 학습 재개: Step {step_num}")
+                    return latest_checkpoint
         
         logger.info("[ CHECKPOINT ] 로컬에 체크포인트가 없습니다.")
         
@@ -540,8 +569,30 @@ class Qwen14BFineTuner:
                     )
                     
                     latest_checkpoint = os.path.join(self.config.output_dir, latest_checkpoint_name)
+                    step_num = int(latest_checkpoint_name.split('-')[1])
+                    
+                    # Hub에서 다운로드한 checkpoint를 마커 파일에 기록
+                    marker_file = os.path.join(self.config.output_dir, ".hub_uploaded_checkpoints.json")
+                    uploaded_steps = set()
+                    if os.path.exists(marker_file):
+                        try:
+                            with open(marker_file, 'r') as f:
+                                data = json.load(f)
+                                uploaded_steps = set(data.get('uploaded_steps', []))
+                        except Exception:
+                            pass
+                    uploaded_steps.add(step_num)
+                    try:
+                        with open(marker_file, 'w') as f:
+                            json.dump({
+                                'uploaded_steps': sorted(list(uploaded_steps)),
+                                'last_updated': datetime.now().isoformat()
+                            }, f, indent=2)
+                    except Exception as e:
+                        logger.warning(f"[ CHECKPOINT ] 마커 파일 저장 실패: {e}")
+                    
                     logger.info(f"[ CHECKPOINT ] ✅ Hub에서 다운로드 완료: {latest_checkpoint}")
-                    logger.info(f"[ CHECKPOINT ] 학습 재개: Step {latest_checkpoint_name.split('-')[1]}")
+                    logger.info(f"[ CHECKPOINT ] 학습 재개: Step {step_num} (Hub에서 다운로드됨, 안전하게 재개 가능)")
                     return latest_checkpoint
                 else:
                     # checkpoint 디렉토리가 없지만 최종 모델이 있을 수 있음

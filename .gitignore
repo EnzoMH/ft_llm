@@ -64,6 +64,7 @@ datageneration/Instruction/datasets/
 
 # Training outputs
 *-output/
+output/
 *.log
 training*.log
 
