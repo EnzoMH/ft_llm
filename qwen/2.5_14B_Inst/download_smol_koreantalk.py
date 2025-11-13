@@ -108,7 +108,7 @@ def main():
     print("="*80)
     
     # 출력 경로
-    output_path = "/home/work/tesseract/korean_large_data/cleaned_jsonl/smol_koreantalk_full.jsonl"
+    output_path = "/home/work/tes/korean_large_data/cleaned_jsonl/smol_koreantalk_full.jsonl"
     
     print(f"\n출력 파일: {output_path}")
     

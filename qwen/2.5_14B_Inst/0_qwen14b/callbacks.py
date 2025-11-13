@@ -114,26 +114,32 @@ class HubUploadCallback(TrainerCallback):
             logger.warning(f"[ HUB ] 로그인 실패: {e}")
     
     def on_save(self, args, state, control, **kwargs):
-        """체크포인트 저장 시 Hub에 업로드"""
+        """체크포인트 저장 시 Hub에 업로드 (checkpoint-XXX 디렉토리 구조 유지)"""
         if state.global_step % self.upload_every_n_steps == 0:
             checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+            checkpoint_name = f"checkpoint-{state.global_step}"
             
             if os.path.exists(checkpoint_dir):
                 try:
                     logger.info(f"[ HUB ] Step {state.global_step} 체크포인트 업로드 시작...")
+                    logger.info(f"[ HUB ] 체크포인트 경로: {checkpoint_dir}")
                     
-                    # Hub에 업로드 (private repo로 생성)
+                    # checkpoint-XXX 디렉토리 구조를 유지하기 위해 output_dir를 기준으로 업로드
+                    # allow_patterns로 checkpoint-XXX/**만 업로드
                     self.api.upload_folder(
-                        folder_path=checkpoint_dir,
+                        folder_path=args.output_dir,  # output_dir를 기준으로
                         repo_id=self.hub_model_id,
                         repo_type="model",
                         commit_message=f"Checkpoint at step {state.global_step}",
-                        ignore_patterns=["*.pt", "*.bin"],  # safetensors만 업로드
+                        allow_patterns=[f"{checkpoint_name}/**"],  # checkpoint-XXX/** 패턴만 업로드
                     )
                     
-                    logger.info(f"[ HUB ] ✅ Step {state.global_step} 업로드 완료: https://huggingface.co/{self.hub_model_id}")
+                    logger.info(f"[ HUB ] ✅ Step {state.global_step} 체크포인트 업로드 완료")
+                    logger.info(f"[ HUB ] URL: https://huggingface.co/{self.hub_model_id}/tree/main/{checkpoint_name}")
                 except Exception as e:
-                    logger.error(f"[ HUB ] ❌ 업로드 실패: {e}")
+                    logger.error(f"[ HUB ] ❌ Step {state.global_step} 업로드 실패: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
     
     def on_train_end(self, args, state, control, **kwargs):
         """훈련 완료 시 최종 모델 업로드"""

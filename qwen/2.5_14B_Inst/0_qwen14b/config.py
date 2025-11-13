@@ -20,12 +20,12 @@ class Qwen14BFineTuningConfig:
     tokenizer_name: Optional[str] = None  # None이면 base_model 사용
     
     # 데이터 (단일 파일 사용)
-    korean_data_dir: str = "/home/work/tesseract/korean_large_data/cleaned_jsonl"
-    data_files: List[str] = None  # ["smol_koreantalk_data.jsonl"]로 오버라이드 예정
+    korean_data_dir: str = "/home/work/tes/korean_large_data/cleaned_jsonl"
+    data_files: List[str] = None  # ["smol_koreantalk_full.jsonl"]로 오버라이드 예정
     max_samples: int = 200000  # RAM 압박 방지 (460k 중 200k 사용)
     
     # 출력
-    output_dir: str = "/home/work/tesseract/qwen/2.5_14B_Inst/output"
+    output_dir: str = "/home/work/tes/ft_llm/qwen/2.5_14B_Inst/output"
     run_name: str = f"qwen25-14b-KR-multiturn-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # LoRA
@@ -33,10 +33,10 @@ class Qwen14BFineTuningConfig:
     lora_alpha: int = 128
     lora_dropout: float = 0.0  # 0으로 설정 → Unsloth 최적화 활성화
     
-    # 학습 설정 (H100 80GB 최적화 - VRAM 20GB 여유 활용)
+    # 학습 설정 (H100 40GB 최적화 - VRAM 안전하게 활용)
     num_train_epochs: int = 3
-    per_device_train_batch_size: int = 28  # 24→28 (VRAM 20GB 여유, 약 17% 증가)
-    gradient_accumulation_steps: int = 2  # 효과적 배치: 56
+    per_device_train_batch_size: int = 12  # 40GB VRAM 기준 (28→12로 감소)
+    gradient_accumulation_steps: int = 4  # 효과적 배치: 48 (12×4)
     learning_rate: float = 2e-4
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
@@ -55,7 +55,7 @@ class Qwen14BFineTuningConfig:
     
     # HuggingFace Hub 업로드 (자동 백업)
     push_to_hub: bool = True  # True로 설정 시 자동 업로드
-    hub_model_id: Optional[str] = ""  # 예: "username/qwen2.5-14b-korean-multiturn"
+    hub_model_id: Optional[str] = "MyeongHo0621/Qwen2.5-14B-Korean"  # 예: "username/qwen2.5-14b-korean-multiturn"
     hub_strategy: str = "checkpoint"  # "checkpoint" (매 checkpoint마다) 또는 "end" (훈련 완료 시만)
-    hub_token: Optional[str] = ""  # None이면 ~/.huggingface/token 사용
+    hub_token: Optional[str] = "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"  # None이면 ~/.huggingface/token 사용
 

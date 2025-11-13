@@ -17,6 +17,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
+# CUDA 메모리 최적화 (40GB VRAM)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 # CPU 코어 수 제한 (RAM 압박 방지)
 import multiprocessing
 _original_mp_cpu_count = multiprocessing.cpu_count
@@ -73,8 +76,8 @@ def main():
     # 설정
     config = Qwen14BFineTuningConfig()
     
-    # 단일 데이터셋 파일 사용 (smol_koreantalk_data.jsonl)
-    config.data_files = ["smol_koreantalk_data.jsonl"]
+    # 단일 데이터셋 파일 사용 (smol_koreantalk_full.jsonl)
+    config.data_files = ["smol_koreantalk_full.jsonl"]
     
     print(f"\n{'='*80}")
     print(" 설정 요약")

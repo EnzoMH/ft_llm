@@ -5,6 +5,7 @@ Qwen2.5-14B 멀티턴 대화 파인튜너
 
 import os
 import gc
+import json
 import logging
 import torch
 from typing import Optional
@@ -16,7 +17,7 @@ from unsloth import FastLanguageModel, is_bfloat16_supported
 from datasets import Dataset
 from trl import SFTTrainer
 from transformers import TrainingArguments
-from huggingface_hub import login
+from huggingface_hub import login, HfApi, snapshot_download
 
 from .config import Qwen14BFineTuningConfig
 from .dataset_loader import MultiTurnDatasetLoader
@@ -98,27 +99,61 @@ class Qwen14BFineTuner:
         
         logger.info(f"[ INFO ] Vocab size: {len(self.tokenizer):,}")
         
-        # LoRA 적용
-        logger.info("[ INFO ] LoRA 설정 적용 중...")
-        logger.info(f"  LoRA r={self.config.lora_r}, alpha={self.config.lora_alpha}")
+        # 기존 adapter 확인 (로컬 또는 Hub에서 다운로드한 최종 모델)
+        # 주의: checkpoint가 있으면 checkpoint에서 adapter를 로드하므로 여기서는 최종 모델만 확인
+        adapter_path = os.path.join(self.config.output_dir, "adapter_model.safetensors")
+        adapter_config_path = os.path.join(self.config.output_dir, "adapter_config.json")
         
-        self.model = FastLanguageModel.get_peft_model(
-            self.model,
-            r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
-            target_modules=[
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj"
-            ],
-            bias="none",
-            use_gradient_checkpointing=self.config.use_gradient_checkpointing,
-            random_state=42,
-            use_rslora=False,
-            loftq_config=None
-        )
+        # checkpoint가 없는 경우에만 최종 adapter 로드 시도
+        checkpoints = []
+        if os.path.exists(self.config.output_dir):
+            checkpoints = [d for d in os.listdir(self.config.output_dir) 
+                          if d.startswith("checkpoint-") and os.path.isdir(os.path.join(self.config.output_dir, d))]
         
-        logger.info("[ COMPLETE ] LoRA 적용 완료")
+        if not checkpoints and os.path.exists(adapter_path) and os.path.exists(adapter_config_path):
+            # checkpoint가 없고 최종 adapter만 있는 경우 (Hub에서 다운로드한 경우)
+            logger.info("[ INFO ] 기존 adapter 발견! 최종 모델을 로드합니다...")
+            logger.info(f"  Adapter 경로: {adapter_path}")
+            
+            # trainer_state.json 확인
+            trainer_state_path = os.path.join(self.config.output_dir, "trainer_state.json")
+            if os.path.exists(trainer_state_path):
+                with open(trainer_state_path, 'r') as f:
+                    state = json.load(f)
+                global_step = state.get('global_step', 0)
+                logger.info(f"  이전 학습: Step {global_step}")
+            
+            # 기존 adapter 로드
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(
+                self.model,
+                self.config.output_dir,
+                is_trainable=True
+            )
+            logger.info("[ COMPLETE ] 기존 adapter 로드 완료 (학습 재개 가능)")
+        else:
+            # LoRA 적용 (새로 시작 또는 checkpoint에서 재개)
+            logger.info("[ INFO ] LoRA 설정 적용 중...")
+            logger.info(f"  LoRA r={self.config.lora_r}, alpha={self.config.lora_alpha}")
+            
+            self.model = FastLanguageModel.get_peft_model(
+                self.model,
+                r=self.config.lora_r,
+                lora_alpha=self.config.lora_alpha,
+                lora_dropout=self.config.lora_dropout,
+                target_modules=[
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"
+                ],
+                bias="none",
+                use_gradient_checkpointing=self.config.use_gradient_checkpointing,
+                random_state=42,
+                use_rslora=False,
+                loftq_config=None
+            )
+            
+            logger.info("[ COMPLETE ] LoRA 적용 완료")
+        
         log_system_resources(logger, "LoRA 적용 후")
         
         # Trainable parameters
@@ -272,8 +307,11 @@ class Qwen14BFineTuner:
         
         os.makedirs(self.config.output_dir, exist_ok=True)
         
-        # GPU 캐시 정리 및 메모리 최적화
+        # GPU 캐시 정리 및 메모리 최적화 (40GB VRAM 최적화)
         log_system_resources(logger, "학습 준비")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
         if gpu_monitor.available:
             gpu_monitor.clear_cache()
             logger.info("[ COMPLETE ] GPU 캐시 정리 완료")
@@ -328,7 +366,7 @@ class Qwen14BFineTuner:
             run_name=self.config.run_name,
             num_train_epochs=self.config.num_train_epochs,
             per_device_train_batch_size=self.config.per_device_train_batch_size,
-            per_device_eval_batch_size=self.config.per_device_train_batch_size,
+            per_device_eval_batch_size=8,  # 평가는 더 작은 배치 사용 (메모리 절약)
             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
             learning_rate=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
@@ -404,17 +442,8 @@ class Qwen14BFineTuner:
         
         log_system_resources(logger, "훈련 시작")
         
-        # Resume 체크포인트 자동 감지
-        resume_checkpoint = None
-        if os.path.exists(self.config.output_dir):
-            checkpoints = [d for d in os.listdir(self.config.output_dir) 
-                          if d.startswith("checkpoint-") and os.path.isdir(os.path.join(self.config.output_dir, d))]
-            if checkpoints:
-                # 가장 최근 체크포인트 찾기
-                checkpoints.sort(key=lambda x: int(x.split("-")[1]))
-                resume_checkpoint = os.path.join(self.config.output_dir, checkpoints[-1])
-                logger.info(f"[ INFO ] 체크포인트 발견: {resume_checkpoint}")
-                logger.info(f"[ INFO ] 학습 재개 중...")
+        # Resume 체크포인트 자동 감지 (Fallback Logic)
+        resume_checkpoint = self._find_resume_checkpoint(logger)
         
         trainer.train(resume_from_checkpoint=resume_checkpoint)
         
@@ -447,4 +476,119 @@ class Qwen14BFineTuner:
         logger.info("="*80)
         
         return final_path
+    
+    def _find_resume_checkpoint(self, logger) -> Optional[str]:
+        """
+        Checkpoint 찾기 (Fallback Logic)
+        1. 로컬 checkpoint 확인
+        2. 없으면 Hub에서 다운로드 시도
+        3. 없으면 None 반환 (처음부터 시작)
+        
+        Returns:
+            Optional[str]: checkpoint 경로 또는 None
+        """
+        logger.info("="*80)
+        logger.info("[ CHECKPOINT ] 체크포인트 검색 중...")
+        logger.info("="*80)
+        
+        # 1. 로컬 checkpoint 확인
+        if os.path.exists(self.config.output_dir):
+            checkpoints = [d for d in os.listdir(self.config.output_dir) 
+                          if d.startswith("checkpoint-") and os.path.isdir(os.path.join(self.config.output_dir, d))]
+            if checkpoints:
+                # 가장 최근 체크포인트 찾기
+                checkpoints.sort(key=lambda x: int(x.split("-")[1]) if x.split("-")[1].isdigit() else 0)
+                latest_checkpoint = os.path.join(self.config.output_dir, checkpoints[-1])
+                logger.info(f"[ CHECKPOINT ] ✅ 로컬 체크포인트 발견: {latest_checkpoint}")
+                logger.info(f"[ CHECKPOINT ] 학습 재개: Step {checkpoints[-1].split('-')[1]}")
+                return latest_checkpoint
+        
+        logger.info("[ CHECKPOINT ] 로컬에 체크포인트가 없습니다.")
+        
+        # 2. Hub에서 checkpoint 다운로드 시도
+        if self.config.push_to_hub and self.config.hub_model_id and self.config.hub_token:
+            try:
+                logger.info(f"[ CHECKPOINT ] Hub에서 체크포인트 검색 중: {self.config.hub_model_id}")
+                api = HfApi(token=self.config.hub_token)
+                
+                # Hub의 모든 파일 확인
+                files = api.list_repo_files(self.config.hub_model_id, repo_type="model")
+                
+                # checkpoint 디렉토리 찾기
+                checkpoint_dirs = set()
+                for f in files:
+                    if "checkpoint-" in f and "/" in f:
+                        parts = f.split("/")
+                        if len(parts) > 1 and parts[0].startswith("checkpoint-"):
+                            checkpoint_dirs.add(parts[0])
+                
+                if checkpoint_dirs:
+                    checkpoint_dirs = sorted(checkpoint_dirs, key=lambda x: int(x.split("-")[1]) if x.split("-")[1].isdigit() else 0)
+                    latest_checkpoint_name = checkpoint_dirs[-1]
+                    
+                    logger.info(f"[ CHECKPOINT ] Hub에서 체크포인트 발견: {latest_checkpoint_name}")
+                    logger.info(f"[ CHECKPOINT ] 다운로드 시작...")
+                    
+                    # checkpoint 다운로드
+                    os.makedirs(self.config.output_dir, exist_ok=True)
+                    snapshot_download(
+                        repo_id=self.config.hub_model_id,
+                        repo_type="model",
+                        local_dir=self.config.output_dir,
+                        token=self.config.hub_token,
+                        allow_patterns=f"{latest_checkpoint_name}/*"
+                    )
+                    
+                    latest_checkpoint = os.path.join(self.config.output_dir, latest_checkpoint_name)
+                    logger.info(f"[ CHECKPOINT ] ✅ Hub에서 다운로드 완료: {latest_checkpoint}")
+                    logger.info(f"[ CHECKPOINT ] 학습 재개: Step {latest_checkpoint_name.split('-')[1]}")
+                    return latest_checkpoint
+                else:
+                    # checkpoint 디렉토리가 없지만 최종 모델이 있을 수 있음
+                    logger.info("[ CHECKPOINT ] Hub에 checkpoint 디렉토리가 없습니다.")
+                    
+                    # trainer_state.json 확인
+                    try:
+                        from huggingface_hub import hf_hub_download
+                        trainer_state_path = hf_hub_download(
+                            repo_id=self.config.hub_model_id,
+                            filename="trainer_state.json",
+                            repo_type="model",
+                            token=self.config.hub_token,
+                            cache_dir="/tmp"
+                        )
+                        with open(trainer_state_path, 'r') as f:
+                            state = json.load(f)
+                        global_step = state.get('global_step', 0)
+                        
+                        if global_step > 0:
+                            logger.info(f"[ CHECKPOINT ] Hub에 최종 모델 발견 (Step {global_step})")
+                            logger.info("[ CHECKPOINT ] 최종 모델 다운로드 중...")
+                            
+                            # 모든 파일 다운로드 (adapter 포함)
+                            snapshot_download(
+                                repo_id=self.config.hub_model_id,
+                                repo_type="model",
+                                local_dir=self.config.output_dir,
+                                token=self.config.hub_token,
+                                ignore_patterns=["*.md", ".git*"]
+                            )
+                            
+                            logger.info("[ CHECKPOINT ] ✅ 최종 모델 다운로드 완료")
+                            logger.info("[ CHECKPOINT ] ⚠️  checkpoint 디렉토리가 없어 optimizer state는 없습니다.")
+                            logger.info("[ CHECKPOINT ] adapter 가중치는 로드되어 학습을 계속할 수 있습니다.")
+                            # adapter는 이미 load_model에서 로드됨
+                            return None  # checkpoint가 없으므로 None 반환 (adapter는 이미 로드됨)
+                    except Exception as e:
+                        logger.warning(f"[ CHECKPOINT ] Hub에서 trainer_state.json 확인 실패: {e}")
+                        
+            except Exception as e:
+                logger.warning(f"[ CHECKPOINT ] Hub에서 checkpoint 다운로드 실패: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+        
+        # 3. checkpoint 없음 - 처음부터 시작
+        logger.info("[ CHECKPOINT ] 체크포인트를 찾을 수 없습니다. 처음부터 학습을 시작합니다.")
+        logger.info("="*80)
+        return None
 
