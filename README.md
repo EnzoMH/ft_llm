@@ -9,7 +9,7 @@
 | Model | Status | Description |
 |-------|--------|-------------|
 | **EEVE-Korean-10.8B** | ✅ Complete | Instruction tuning, HuggingFace 배포 완료 |
-| **Qwen2.5** | 🔄 In Progress | Unsupervised & Checkpoint training |
+| **Qwen2.5-14B-Instruct** | 🔄 In Progress | 한국어 멀티턴 대화 파인튜닝, Flash Attention 2 |
 | **VCLM-Korean-7B** | ✅ Complete | Benchmarking & Evaluation |
 | **SOLAR-10.7B** | ✅ Complete | Legacy project (archived) |
 
@@ -87,7 +87,18 @@ tesseract/
 │   └── quant/                     # Quantization scripts
 │
 ├── qwen/                           # Qwen2.5 Fine-tuning
-│   ├── 0_qwen_ft_us_cp.py         # Qwen training with checkpoint
+│   ├── 2.5_14B_Inst/              # Qwen2.5-14B-Instruct 멀티턴 대화 파인튜닝
+│   │   ├── 0_qwen14b_multiturn_ft.py  # Main training script
+│   │   ├── 0_qwen14b/             # Training modules
+│   │   │   ├── config.py          # Configuration
+│   │   │   ├── trainer.py         # Trainer with checkpoint resume
+│   │   │   ├── dataset_loader.py  # Multi-turn dataset loader
+│   │   │   ├── callbacks.py       # Hub upload & monitoring callbacks
+│   │   │   └── utils.py           # System resource monitoring
+│   │   ├── requirements.txt       # Dependencies
+│   │   └── output/                # Training outputs & checkpoints
+│   ├── 2.5_7B/                    # Qwen2.5-7B (legacy)
+│   ├── 0_qwen_ft_us_cp.py         # Legacy Qwen training script
 │   ├── util/                      # Training utilities
 │   │   ├── cpu_mntrg.py           # CPU monitoring
 │   │   ├── gpu_mnrtg.py           # GPU monitoring
@@ -332,21 +343,105 @@ labels[labels == pad_token_id] = -100  # 패딩 마스킹
 
 ---
 
-## 2. Qwen2.5 Fine-tuning
+## 2. Qwen2.5-14B-Instruct Fine-tuning
 
 ### Model Information
 
-- **Base Model**: Qwen2.5 series
+- **Base Model**: [Qwen/Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct)
 - **Status**: 🔄 In Progress
-- **Method**: Unsupervised learning with checkpoint support
-- **Features**: CPU/GPU monitoring, custom dataset loader
+- **Deployed Model**: [MyeongHo0621/Qwen2.5-14B-Korean](https://huggingface.co/MyeongHo0621/Qwen2.5-14B-Korean)
+- **Method**: LoRA (r=64, alpha=128) + Unsloth + Flash Attention 2
+- **Task**: 한국어 멀티턴 대화 파인튜닝
+- **Vocab Size**: 151,665
+- **Context Length**: 4,096 tokens
+
+### Training Configuration
+
+#### Hardware
+- **GPU**: NVIDIA H100 80GB HBM3
+- **CPU**: 12 cores (limited for RAM optimization)
+- **RAM**: 127GB
+- **Framework**: Unsloth 2025.11.2 + PyTorch 2.8.0 + Transformers 4.57.1
+
+#### LoRA Settings
+- **r**: 64
+- **alpha**: 128
+- **dropout**: 0.0 (Unsloth 최적화 활성화)
+- **target_modules**: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+- **use_rslora**: false
+
+#### Training Hyperparameters
+- **Epochs**: 3
+- **Batch Size**: 12 per device
+- **Gradient Accumulation**: 4
+- **Effective Batch Size**: 48 (12 × 4)
+- **Learning Rate**: 2e-4
+- **Max Sequence Length**: 4096 tokens
+- **Warmup Ratio**: 0.03
+- **Weight Decay**: 0.01
+- **Max Grad Norm**: 1.0
+
+#### Memory Optimization
+- **8-bit Quantization**: BitsAndBytes 8-bit
+- **Flash Attention 2**: 2.8.3 (정상 작동)
+- **Unsloth Gradient Checkpointing**: 활성화
+- **BF16 Training**: H100 하드웨어 최적화
+- **Peak VRAM**: ~16.2GB / 39.8GB (40.8%)
+
+#### Data
+- **Dataset**: smol_koreantalk_full.jsonl (460K 샘플)
+- **Max Samples**: 200,000 (RAM 최적화)
+- **Train/Val Split**: 190,000 / 10,000
+- **Format**: ChatML (멀티턴 대화)
+
+#### Checkpoint & Hub Upload
+- **Save Steps**: 100 steps (약 30분마다)
+- **Save Total Limit**: 5 checkpoints
+- **Hub Upload**: 비동기 백그라운드 업로드 (학습 블로킹 방지)
+- **Hub Strategy**: checkpoint (매 checkpoint마다 자동 업로드)
+- **Hub Tracking**: `.hub_uploaded_checkpoints.json`으로 업로드 완료 추적
 
 ### Training Scripts
 
 ```bash
+cd qwen/2.5_14B_Inst
+
+# Main training script (멀티턴 대화 파인튜닝)
+python 0_qwen14b_multiturn_ft.py
+
+# Training with nohup (백그라운드 실행)
+nohup python 0_qwen14b_multiturn_ft.py > train.log 2>&1 &
+```
+
+### Key Features
+
+- ✅ **Flash Attention 2**: 정상 작동 (2.8.3)
+- ✅ **Checkpoint Resume**: Hub 업로드 완료된 checkpoint 우선 사용
+- ✅ **비동기 Hub 업로드**: 학습 블로킹 방지
+- ✅ **시스템 리소스 모니터링**: CPU/RAM/GPU 실시간 추적
+- ✅ **멀티턴 대화**: ChatML 포맷 지원
+- ✅ **자동 체크포인트 관리**: Hub 업로드 완료 여부 추적
+
+### Training Progress
+
+- **Current Status**: Step 200+ 진행 중
+- **Total Steps**: 11,877 steps (3 epochs)
+- **Step Time**: ~19.6초/step
+- **Estimated Time**: ~64시간 (2.7일)
+
+### Training Metrics (Step 200 기준)
+
+- **Loss**: 0.96~1.01 (정상 범위)
+- **Eval Loss**: 0.9719
+- **Grad Norm**: 0.20~0.31 (정상 범위)
+- **Learning Rate**: Warmup 진행 중 (현재 0.000111)
+
+### Legacy Qwen Scripts
+
+```bash
 cd qwen
 
-# Main training script with checkpoint support
+# Legacy training script with checkpoint support
 python 0_qwen_ft_us_cp.py
 ```
 
@@ -356,15 +451,11 @@ python 0_qwen_ft_us_cp.py
 - `util/cpu_mntrg.py`: CPU usage monitoring
 - `util/gpu_mnrtg.py`: GPU usage monitoring (NVIDIA-SMI)
 - `util/monitoring_callback.py`: Training callback with resource tracking
+- `0_qwen14b/utils.py`: 시스템 리소스 모니터링 (CPU/RAM/GPU)
 
 #### Dataset Loader
 - `util/local_dataset_loader.py`: Custom dataset loading utilities
-
-### Key Features
-- ✅ Checkpoint save/resume
-- ✅ Real-time resource monitoring
-- ✅ Custom dataset pipeline
-- ✅ Distributed training support
+- `0_qwen14b/dataset_loader.py`: 멀티턴 대화 데이터셋 로더
 
 ---
 
@@ -481,18 +572,28 @@ python eval.py
 
 ### Software Dependencies
 
+#### Base Dependencies
 ```bash
 # PyTorch & Transformers
-pip install torch transformers accelerate
+pip install torch>=2.8.0 transformers>=4.57.0 accelerate>=1.11.0
 
 # Optimization libraries
-pip install unsloth bitsandbytes peft
+pip install unsloth>=2025.11.2 bitsandbytes>=0.48.0 peft>=0.14.0
+
+# Flash Attention 2 (H100 최적화)
+pip install flash-attn==2.8.3 --no-build-isolation
 
 # Monitoring & utilities
-pip install psutil nvidia-ml-py3 tqdm
+pip install psutil>=7.1.0 nvidia-ml-py3 tqdm
 
 # Data processing
-pip install datasets faiss-cpu pandas
+pip install datasets>=3.4.0 faiss-cpu pandas
+```
+
+#### Qwen2.5-14B Specific
+```bash
+cd qwen/2.5_14B_Inst
+pip install -r requirements.txt
 ```
 
 --- 
@@ -521,7 +622,11 @@ pip install psutil nvidia-ml-py3 datasets faiss-cpu
 cd eeve
 python 0_unsl_ft.py
 
-# Qwen Fine-tuning
+# Qwen2.5-14B-Instruct Fine-tuning
+cd qwen/2.5_14B_Inst
+python 0_qwen14b_multiturn_ft.py
+
+# Legacy Qwen Fine-tuning
 cd qwen
 python 0_qwen_ft_us_cp.py
 
@@ -535,16 +640,19 @@ python benchmark_vclm_kocoder.py
 ## Best Practices
 
 ### Memory Optimization Tips
-1. **4-bit Quantization**: 메모리 사용량 75% 감소
-2. **Gradient Checkpointing**: 추가 30% 메모리 절약
-3. **LoRA**: Full fine-tuning 대비 99.5% 파라미터 감소
-4. **Mixed Precision (BF16)**: 학습 속도 2배 향상
+1. **8-bit Quantization**: BitsAndBytes 8-bit로 메모리 사용량 감소
+2. **Flash Attention 2**: 메모리 효율적인 어텐션 연산 (H100 최적화)
+3. **Gradient Checkpointing**: Unsloth 최적화로 추가 메모리 절약
+4. **LoRA**: Full fine-tuning 대비 98%+ 파라미터 감소 (r=64 기준)
+5. **Mixed Precision (BF16)**: H100 하드웨어 최적화로 학습 속도 향상
 
 ### Training Tips
-- Checkpoint 자주 저장 (250-500 steps)
-- Learning rate warmup 사용 (5-10%)
-- Gradient accumulation으로 effective batch size 증가
-- Label masking으로 instruction tuning 품질 향상
+- **Checkpoint 관리**: 자주 저장 (100-250 steps), Hub 업로드 완료 추적
+- **Learning rate warmup**: 3-5% warmup ratio 권장
+- **Gradient accumulation**: Effective batch size 증가 (예: 12×4=48)
+- **Label masking**: Instruction tuning 품질 향상 (프롬프트 부분 마스킹)
+- **비동기 Hub 업로드**: 학습 블로킹 방지를 위해 백그라운드 업로드 사용
+- **Flash Attention 2**: H100 GPU에서 필수 (메모리 효율성 및 속도 향상)
 
 ### Data Quality
 - 데이터 검증 도구로 품질 확인 (`datageneration/valid/`)
