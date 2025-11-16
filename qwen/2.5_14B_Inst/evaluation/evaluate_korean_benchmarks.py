@@ -46,15 +46,23 @@ class KoreanBenchmarkEvaluator:
     
     def generate_answer(self, prompt: str, max_new_tokens: int = 512) -> str:
         """프롬프트에 대한 답변 생성"""
+        import time as time_module
+        
+        # 시간 측정 시작
+        gen_start = time_module.time()
+        
         messages = [{"role": "user", "content": prompt}]
         
+        tokenize_start = time_module.time()
         inputs = self.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt"
         ).to(self.device)
+        tokenize_time = time_module.time() - tokenize_start
         
+        generate_start = time_module.time()
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=inputs,
@@ -64,11 +72,21 @@ class KoreanBenchmarkEvaluator:
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
+        generate_time = time_module.time() - generate_start
         
+        decode_start = time_module.time()
         generated_text = self.tokenizer.decode(
             outputs[0][inputs.shape[1]:],
             skip_special_tokens=True
         )
+        decode_time = time_module.time() - decode_start
+        
+        total_time = time_module.time() - gen_start
+        
+        # 첫 번째 샘플에서만 상세 시간 출력
+        if not hasattr(self, '_first_sample_logged'):
+            print(f"  [성능 진단] 토크나이징: {tokenize_time*1000:.1f}ms, 생성: {generate_time:.2f}초, 디코딩: {decode_time*1000:.1f}ms, 총: {total_time:.2f}초")
+            self._first_sample_logged = True
         
         return generated_text.strip()
     
@@ -825,8 +843,8 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="evaluation_results",
-        help="결과 저장 디렉토리"
+        default=None,  # None이면 스크립트 위치 기준으로 설정
+        help="결과 저장 디렉토리 (기본값: evaluation/evaluation_results)"
     )
     parser.add_argument(
         "--max-samples",
@@ -944,6 +962,11 @@ def main():
         sys.exit(1)
     
     print(f"\nGPU: {torch.cuda.get_device_name(0)}")
+    
+    # output_dir 설정 (기본값: 스크립트 위치 기준 evaluation_results)
+    if args.output_dir is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        args.output_dir = os.path.join(script_dir, "evaluation_results")
     
     # 평가 실행
     evaluate_benchmarks(

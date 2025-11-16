@@ -103,7 +103,11 @@ final/
 !qwen/README.md 
 !instruction/README.md
 !datageneration/inst_eeve/README.md
+!3b_model_tuning_strategy.md
+!distilation_strategy.md
 
 # Temporary/Test files
 INFERENCE_OPTIMIZATION_PLAN.md
 /test/
+
+/home/work/vss/ft_llm/qwen/2.5_distil/unsloth_compiled_cache
