@@ -151,6 +151,23 @@ class HubUploadCallback(TrainerCallback):
         checkpoint_dir = os.path.join(output_dir, checkpoint_name)
         
         if not os.path.exists(checkpoint_dir):
+            logger.warning(f"[ HUB ] 체크포인트 디렉토리가 없습니다: {checkpoint_dir}")
+            return
+        
+        # trainer_state.json이 저장될 때까지 대기 (최대 30초)
+        trainer_state_path = os.path.join(checkpoint_dir, "trainer_state.json")
+        max_wait_time = 30
+        wait_interval = 0.5
+        waited_time = 0
+        
+        while not os.path.exists(trainer_state_path) and waited_time < max_wait_time:
+            import time
+            time.sleep(wait_interval)
+            waited_time += wait_interval
+        
+        if not os.path.exists(trainer_state_path):
+            logger.error(f"[ HUB ] ❌ trainer_state.json이 저장되지 않았습니다: {trainer_state_path}")
+            logger.error(f"[ HUB ] ❌ 학습 재개를 위해 trainer_state.json이 필요합니다!")
             return
         
         with self.upload_lock:

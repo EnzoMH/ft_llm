@@ -1,24 +1,33 @@
+# Core dependencies
+python-dotenv>=1.0.0
 
+# PyTorch
 torch>=2.8.0
 torchvision>=0.23.0
 
+# Transformers ecosystem
 transformers>=4.57.0
 datasets>=3.4.0
 accelerate>=1.11.0
 trl>=0.23.0
-
 peft>=0.14.0
 bitsandbytes>=0.48.0
+huggingface-hub>=0.36.0
+safetensors>=0.6.0
+
+# Flash Attention (H100 최적화)
 flash-attn==2.8.3
 
+# Unsloth (최적화된 파인튜닝)
 unsloth>=2025.11.2
 unsloth-zoo>=2025.11.3
 
+# Utilities
 scipy>=1.14.0
 sentencepiece>=0.2.0
 protobuf>=3.20.0
 psutil>=7.1.0
-huggingface-hub>=0.36.0
-safetensors>=0.6.0
 
-
+# Evaluation
+numpy>=1.24.0
+pandas>=2.0.0
