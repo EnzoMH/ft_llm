@@ -110,4 +110,5 @@ final/
 INFERENCE_OPTIMIZATION_PLAN.md
 /test/
 
-/home/work/vss/ft_llm/qwen/2.5_distil/unsloth_compiled_cache
+unsloth_compiled_cache/
+**/unsloth_compiled_cache/
