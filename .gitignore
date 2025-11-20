@@ -112,3 +112,7 @@ INFERENCE_OPTIMIZATION_PLAN.md
 
 unsloth_compiled_cache/
 **/unsloth_compiled_cache/
+
+# Checkpoints
+qwen/2.5_distil/outputs/checkpoints/
+**/qwen/2.5_distil/outputs/checkpoints/

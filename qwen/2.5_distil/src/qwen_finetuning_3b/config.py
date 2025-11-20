@@ -50,10 +50,10 @@ class Qwen3BFineTuningConfig:
     lora_dropout: float = 0.0  # 0으로 설정 → Unsloth 최적화 활성화
     
     # 학습 설정 (H100 80GB 최적화)
-    num_train_epochs: int = 1  # 460k 샘플 기준 1 epoch로 시작
+    num_train_epochs: int = 3  # 46만개 샘플 × 3 epoch
     per_device_train_batch_size: int = 32  # 3B는 더 큰 배치 가능
     gradient_accumulation_steps: int = 4  # 효과적 배치: 128 (32×4)
-    learning_rate: float = 2e-4
+    learning_rate: float = 1e-4  # 7.5e-5 → 1e-4 (plateau 탈출)
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
     max_grad_norm: float = 1.0
@@ -64,10 +64,16 @@ class Qwen3BFineTuningConfig:
     load_in_4bit: bool = False
     
     # 저장
-    save_steps: int = 500  # 500 step마다 저장
+    save_steps: int = 500  # 500 step마다 저장 (약 5시간마다)
     save_total_limit: int = 3  # 최근 3개 체크포인트 유지
     logging_steps: int = 10
     eval_steps: Optional[int] = None  # 평가 없음
+    
+    # 데이터셋 처리 (시스템 리소스 기반 최적화)
+    # CPU: 24 코어 → 8 코어로 제한, RAM: 63GB (51GB 사용 가능)
+    # 멀티프로세싱 오류 방지를 위해 데이터셋을 미리 토크나이징
+    pre_tokenize_dataset: bool = True  # True: format_dataset에서 토크나이징 완료, False: Unsloth에서 토크나이징
+    dataset_num_proc: int = 1  # pre_tokenize_dataset=True일 때는 사용되지 않음
     
     # HuggingFace Hub 업로드
     push_to_hub: bool = True

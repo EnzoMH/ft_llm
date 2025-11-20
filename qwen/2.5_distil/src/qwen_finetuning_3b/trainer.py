@@ -20,6 +20,7 @@ from datasets import Dataset
 from trl import SFTTrainer
 from transformers import TrainingArguments
 from huggingface_hub import login, HfApi, snapshot_download
+from pathlib import Path
 
 from .config import Qwen3BFineTuningConfig
 from .dataset_loader import MultiTurnDatasetLoader
@@ -292,13 +293,13 @@ class Qwen3BFineTuner:
         return dataset
     
     def format_dataset(self, dataset: Dataset) -> Dataset:
-        """데이터셋 포맷팅 (ChatML) - 메모리 효율적
+        """데이터셋 포맷팅 및 토크나이징 (ChatML) - 메모리 효율적
         
         Args:
             dataset: 원본 데이터셋
             
         Returns:
-            Dataset: 포맷팅된 데이터셋
+            Dataset: 포맷팅 및 토크나이징된 데이터셋 (input_ids 포함)
         """
         logger.info(f"[ INFO ] 데이터셋 포맷팅 시작... (입력: {len(dataset):,}개)")
         
@@ -306,18 +307,27 @@ class Qwen3BFineTuner:
             logger.error("[ ERROR ] 입력 데이터셋이 비어있습니다!")
             raise ValueError("입력 데이터셋이 0개입니다")
         
+        # 토크나이징 여부 확인
+        pre_tokenize = self.config.pre_tokenize_dataset
+        
+        if pre_tokenize:
+            logger.info("[ INFO ] 데이터셋을 미리 토크나이징합니다 (멀티프로세싱 오류 방지)")
+            logger.info(f"[ INFO ] Max seq length: {self.config.max_seq_length}")
+        
         formatted_data = []
         failed_count = 0
         text_field_count = 0
         messages_field_count = 0
         batch = []
-        batch_size = 5000
+        batch_size = 5000 if not pre_tokenize else 1000  # 토크나이징 시 메모리 압박 방지를 위해 작은 배치
         
         for i, example in enumerate(dataset):
             try:
+                text = None
+                
                 # text 필드가 이미 있는 경우
                 if 'text' in example and example['text'] is not None and '<|im_start|>' in example['text']:
-                    batch.append({"text": example['text']})
+                    text = example['text']
                     text_field_count += 1
                 
                 # messages 필드가 있는 경우
@@ -334,22 +344,44 @@ class Qwen3BFineTuner:
                         tokenize=False,
                         add_generation_prompt=False
                     )
-                    
-                    batch.append({"text": text})
                     messages_field_count += 1
                 else:
                     failed_count += 1
+                    continue
+                
+                # 토크나이징이 필요한 경우
+                if pre_tokenize and text:
+                    try:
+                        tokenized = self.tokenizer(
+                            text,
+                            truncation=True,
+                            max_length=self.config.max_seq_length,
+                            return_token_type_ids=False,
+                            add_special_tokens=True,
+                        )
+                        batch.append({
+                            "input_ids": tokenized["input_ids"],
+                            "attention_mask": tokenized.get("attention_mask", [1] * len(tokenized["input_ids"]))
+                        })
+                    except Exception as e:
+                        failed_count += 1
+                        continue
+                else:
+                    # 토크나이징 없이 text만 저장
+                    batch.append({"text": text})
                 
                 # 배치가 차면 추가하고 초기화
                 if len(batch) >= batch_size:
                     formatted_data.extend(batch)
                     batch = []
+                    if pre_tokenize and (i + 1) % 10000 == 0:
+                        logger.info(f"  토크나이징 진행: {i+1:,}/{len(dataset):,}")
                 
             except Exception as e:
                 failed_count += 1
                 continue
             
-            if (i + 1) % 50000 == 0:
+            if not pre_tokenize and (i + 1) % 50000 == 0:
                 logger.info(f"  진행: {i+1:,}/{len(dataset):,}")
         
         # 남은 배치 처리
@@ -361,17 +393,20 @@ class Qwen3BFineTuner:
         logger.info(f"  messages 변환: {messages_field_count:,}개")
         logger.info(f"  실패: {failed_count:,}개")
         logger.info(f"  총: {len(formatted_data):,}개")
+        if pre_tokenize:
+            logger.info(f"  토크나이징 완료: input_ids 포함")
         
         if len(formatted_data) == 0:
             raise ValueError(f"포맷팅된 데이터가 0개입니다! 원본 데이터: {len(dataset):,}개")
         
         return Dataset.from_list(formatted_data)
     
-    def train(self, dataset: Dataset) -> str:
+    def train(self, dataset: Dataset, resume_from_checkpoint: Optional[str] = None) -> str:
         """학습 실행
         
         Args:
             dataset: 학습할 데이터셋
+            resume_from_checkpoint: 재개할 checkpoint 경로 (Hub 모델 ID 또는 로컬 경로)
             
         Returns:
             str: 최종 모델 저장 경로
@@ -408,8 +443,18 @@ class Qwen3BFineTuner:
         logger.info("\n" + "="*80)
         logger.info("[ SAMPLE ] 첫 번째 훈련 데이터:")
         logger.info("="*80)
-        sample_text = train_formatted[0]['text']
-        logger.info(sample_text[:500] + "..." if len(sample_text) > 500 else sample_text)
+        sample = train_formatted[0]
+        if 'text' in sample:
+            sample_text = sample['text']
+            logger.info(sample_text[:500] + "..." if len(sample_text) > 500 else sample_text)
+        elif 'input_ids' in sample:
+            # 토크나이징된 경우 디코딩하여 출력
+            input_ids = sample['input_ids']
+            sample_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+            logger.info(f"input_ids 길이: {len(input_ids)}")
+            logger.info(sample_text[:500] + "..." if len(sample_text) > 500 else sample_text)
+        else:
+            logger.info(f"샘플 키: {list(sample.keys())}")
         logger.info("="*80 + "\n")
         
         # 훈련 인자
@@ -446,18 +491,42 @@ class Qwen3BFineTuner:
             hub_model_id=self.config.hub_model_id if self.config.push_to_hub else None,
         )
         
+        # Unsloth가 args에서 읽을 수 있도록 dataset_num_proc 추가
+        # TrainingArguments는 이 파라미터를 직접 지원하지 않으므로 setattr 사용
+        # 미리 토크나이징한 경우 Unsloth가 토크나이징을 건너뛰므로 dataset_num_proc은 사용되지 않음
+        setattr(training_args, "dataset_num_proc", self.config.dataset_num_proc)
+        
         # Callback 리스트 생성
         callbacks = [TrainingMonitorCallback()]
         
         # Trainer 생성
         logger.info("[ INFO ] SFTTrainer 초기화 중...")
+        if self.config.pre_tokenize_dataset:
+            logger.info("[ INFO ] 데이터셋이 이미 토크나이징되어 있어 Unsloth 토크나이징 단계를 건너뜁니다")
+        else:
+            logger.info(f"[ INFO ] dataset_num_proc: {self.config.dataset_num_proc} (CPU 코어 제한: 8개)")
+        
+        # fa3 환경에서 멀티프로세싱 충돌 방지를 위한 환경 변수 설정
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["NUMEXPR_NUM_THREADS"] = "1"
+        os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
+        
+        # 멀티프로세싱 안정성을 위한 추가 설정
+        import multiprocessing
+        try:
+            multiprocessing.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass  # 이미 설정된 경우 무시
+        
         trainer = SpeedLoggingSFTTrainer(
             model=self.model,
             tokenizer=self.tokenizer,
             train_dataset=train_formatted,
             dataset_text_field="text",
             max_seq_length=self.config.max_seq_length,
-            dataset_num_proc=4,
+            dataset_num_proc=self.config.dataset_num_proc,  # config에서 설정된 값 사용 (4개 프로세스)
             packing=False,
             args=training_args,
             callbacks=callbacks,
@@ -474,7 +543,75 @@ class Qwen3BFineTuner:
         
         log_system_resources(logger, "훈련 시작")
         
-        trainer.train()
+        # Checkpoint에서 재개
+        if resume_from_checkpoint:
+            # Hub 모델 ID인 경우 다운로드
+            if "/" in resume_from_checkpoint and not os.path.exists(resume_from_checkpoint):
+                logger.info(f"[ INFO ] Hub에서 checkpoint 다운로드 중: {resume_from_checkpoint}")
+                try:
+                    # checkpoint 디렉토리 생성
+                    checkpoint_dir = os.path.join(self.config.output_dir, "resume_checkpoint")
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    
+                    # Hub에서 다운로드
+                    snapshot_download(
+                        repo_id=resume_from_checkpoint,
+                        local_dir=checkpoint_dir,
+                        token=self.config.hub_token or os.getenv("HF_TOKEN"),
+                    )
+                    
+                    # checkpoint-2500 같은 서브디렉토리 찾기
+                    checkpoint_path = None
+                    for item in os.listdir(checkpoint_dir):
+                        item_path = os.path.join(checkpoint_dir, item)
+                        if os.path.isdir(item_path) and item.startswith("checkpoint-"):
+                            # 가장 큰 step 번호의 checkpoint 선택
+                            try:
+                                step_num = int(item.split("-")[1])
+                                if checkpoint_path is None:
+                                    checkpoint_path = (step_num, item_path)
+                                elif step_num > checkpoint_path[0]:
+                                    checkpoint_path = (step_num, item_path)
+                            except (ValueError, IndexError):
+                                continue
+                    
+                    if checkpoint_path:
+                        resume_from_checkpoint = checkpoint_path[1]
+                        logger.info(f"[ COMPLETE ] Checkpoint 다운로드 완료: {resume_from_checkpoint}")
+                    else:
+                        # checkpoint 디렉토리가 없으면 루트를 사용 (adapter 파일이 있는 경우)
+                        if os.path.exists(os.path.join(checkpoint_dir, "adapter_model.safetensors")):
+                            resume_from_checkpoint = checkpoint_dir
+                            logger.info(f"[ COMPLETE ] Checkpoint 다운로드 완료: {resume_from_checkpoint}")
+                        else:
+                            logger.warning("[ WARNING ] Checkpoint 파일을 찾을 수 없습니다. 처음부터 학습을 시작합니다.")
+                            resume_from_checkpoint = None
+                except Exception as e:
+                    logger.error(f"[ ERROR ] Checkpoint 다운로드 실패: {e}")
+                    logger.info("[ INFO ] 처음부터 학습을 시작합니다.")
+                    resume_from_checkpoint = None
+            
+            if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
+                logger.info(f"[ INFO ] Checkpoint에서 재개: {resume_from_checkpoint}")
+                
+                # Learning Rate 재설정을 위해 옵티마이저/스케줄러 상태 파일만 삭제
+                # trainer_state.json은 체크포인트 재개에 필수이므로 유지
+                optimizer_path = os.path.join(resume_from_checkpoint, "optimizer.pt")
+                scheduler_path = os.path.join(resume_from_checkpoint, "scheduler.pt")
+                
+                if os.path.exists(optimizer_path):
+                    logger.info("[ INFO ] 옵티마이저 상태 삭제 (새 Learning Rate 적용)")
+                    os.remove(optimizer_path)
+                if os.path.exists(scheduler_path):
+                    logger.info("[ INFO ] 스케줄러 상태 삭제 (새 Learning Rate 적용)")
+                    os.remove(scheduler_path)
+                
+                trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+            else:
+                logger.info("[ INFO ] 처음부터 학습 시작")
+                trainer.train()
+        else:
+            trainer.train()
         
         # 최종 저장
         final_path = os.path.join(self.config.output_dir, "final")

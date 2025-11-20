@@ -12,14 +12,33 @@ import sys
 import logging
 import time
 import torch
+import argparse
 
 # 멀티프로세싱 최적 설정
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 # CUDA 메모리 최적화
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+# CPU 코어 수 제한 (RAM 압박 방지 및 멀티프로세싱 안정성 향상)
+# 시스템: 24 코어, 63GB RAM → 8 코어로 제한하여 안정성 확보
+import multiprocessing
+_original_mp_cpu_count = multiprocessing.cpu_count
+_original_os_cpu_count = os.cpu_count
+LIMIT_CPU_CORES = 8  # RAM 51GB 사용 가능, 안정적인 토크나이징을 위해 8개로 제한
+multiprocessing.cpu_count = lambda: LIMIT_CPU_CORES
+os.cpu_count = lambda: LIMIT_CPU_CORES
+
+# psutil도 오버라이드
+try:
+    import psutil
+    _original_psutil_cpu_count = psutil.cpu_count
+    psutil.cpu_count = lambda logical=True: LIMIT_CPU_CORES
+except ImportError:
+    pass
 
 # 로깅 설정
 logging.basicConfig(
@@ -41,9 +60,18 @@ from qwen_finetuning_3b import Qwen3BFineTuningConfig, Qwen3BFineTuner
 
 def main():
     """메인 함수"""
+    parser = argparse.ArgumentParser(description="Qwen2.5-3B 파인튜닝")
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="재개할 checkpoint 경로 (Hub 모델 ID 또는 로컬 경로). 예: MyeongHo0621/Qwen2.5-3B-Korean 또는 outputs/checkpoints/checkpoint-2500"
+    )
+    args = parser.parse_args()
+    
     print("\n" + "="*80)
     print(" Qwen2.5-3B-Instruct 한국어 멀티턴 대화 파인튜닝")
-    print(" H100 80GB 최적화 | Flash Attention 3")
+    print(" H100 80GB 최적화 | Flash Attention 2.8.3")
     print("="*80)
     
     # GPU 확인
@@ -60,6 +88,10 @@ def main():
     # 설정
     config = Qwen3BFineTuningConfig()
     
+    # Checkpoint 재개 정보 출력
+    if args.resume_from_checkpoint:
+        print(f"\n[ INFO ] Checkpoint에서 재개: {args.resume_from_checkpoint}")
+    
     print(f"\n{'='*80}")
     print(" 설정 요약")
     print(f"{'='*80}")
@@ -74,6 +106,10 @@ def main():
     print(f"학습률: {config.learning_rate}")
     print(f"Max Seq: {config.max_seq_length}")
     print(f"체크포인트: {config.save_steps} step마다")
+    if config.pre_tokenize_dataset:
+        print(f"데이터셋 처리: 미리 토크나이징 (멀티프로세싱 오류 방지)")
+    else:
+        print(f"데이터셋 처리: {config.dataset_num_proc} 프로세스 (CPU 코어 제한: 8개)")
     print(f"Hub 업로드: {config.hub_model_id}")
     print(f"{'='*80}\n")
     
@@ -90,7 +126,7 @@ def main():
         
         # 3. 훈련
         train_start = time.perf_counter()
-        model_path = finetuner.train(dataset)
+        model_path = finetuner.train(dataset, resume_from_checkpoint=args.resume_from_checkpoint)
         train_end = time.perf_counter()
         
         total_time = train_end - train_start
