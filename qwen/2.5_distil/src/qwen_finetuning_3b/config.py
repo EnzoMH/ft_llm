@@ -38,34 +38,34 @@ class Qwen3BFineTuningConfig:
     # 데이터 (smol_koreantalk_full.jsonl 단일 파일 사용)
     korean_data_dir: str = field(default_factory=lambda: str(get_ft_llm_root() / "data"))
     data_files: List[str] = field(default_factory=lambda: ["smol_koreantalk_full.jsonl"])
-    max_samples: Optional[int] = None  # 전체 사용 (460k 샘플)
+    max_samples: Optional[int] = 60000  # None → 60000 (6시간 제약, 1 epoch 학습)
     
     # 출력
     output_dir: str = field(default_factory=lambda: str(Path(__file__).resolve().parent.parent.parent / "outputs" / "checkpoints"))
     run_name: str = field(default_factory=lambda: f"qwen25-3b-KR-smoltalk-{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     
     # LoRA (3B 모델에 맞게 조정)
-    lora_r: int = 32  # 3B는 32가 적당 (14B는 64)
-    lora_alpha: int = 64  # 3B는 64가 적당 (14B는 128)
-    lora_dropout: float = 0.0  # 0으로 설정 → Unsloth 최적화 활성화
+    lora_r: int = 64  # 32 → 64 (46만 샘플 대규모 데이터셋, 더 높은 표현력)
+    lora_alpha: int = 128  # 64 → 128 (r과 비례하여 증가)
+    lora_dropout: float = 0.05  # 0 → 0.05 (과적합 방지, 일반화 성능 향상)
     
     # 학습 설정 (H100 80GB 최적화)
-    num_train_epochs: int = 3  # 46만개 샘플 × 3 epoch
-    per_device_train_batch_size: int = 32  # 3B는 더 큰 배치 가능
-    gradient_accumulation_steps: int = 4  # 효과적 배치: 128 (32×4)
-    learning_rate: float = 1e-4  # 7.5e-5 → 1e-4 (plateau 탈출)
+    num_train_epochs: int = 1  # 3 → 1 (60k 샘플 × 1 epoch, 6시간 제약)
+    per_device_train_batch_size: int = 32  # 16 → 32 (QLoRA 4bit, VRAM 여유 활용)
+    gradient_accumulation_steps: int = 4  # 8 → 4 (효과적 배치: 128 유지)
+    learning_rate: float = 2e-4  # 1e-4 → 2e-4 (plateau 탈출, 더 공격적 학습)
     weight_decay: float = 0.01
-    warmup_ratio: float = 0.03
+    warmup_ratio: float = 0.1  # 0.03 → 0.1 (더 긴 warmup으로 안정성 확보)
     max_grad_norm: float = 1.0
     
     # 최적화
     use_gradient_checkpointing: str = "unsloth"
-    load_in_8bit: bool = True
-    load_in_4bit: bool = False
+    load_in_8bit: bool = False  # True → False (QLoRA 사용)
+    load_in_4bit: bool = True  # False → True (QLoRA: 메모리 50% 감소)
     
     # 저장
-    save_steps: int = 500  # 500 step마다 저장 (약 5시간마다)
-    save_total_limit: int = 3  # 최근 3개 체크포인트 유지
+    save_steps: int = 200  # 500 → 200 (약 2시간마다, 총 2개 체크포인트)
+    save_total_limit: int = 2  # 3 → 2 (최근 2개 체크포인트 유지, 디스크 절약)
     logging_steps: int = 10
     eval_steps: Optional[int] = None  # 평가 없음
     
@@ -77,7 +77,7 @@ class Qwen3BFineTuningConfig:
     
     # HuggingFace Hub 업로드
     push_to_hub: bool = True
-    hub_model_id: Optional[str] = "MyeongHo0621/Qwen2.5-3B-Korean"
+    hub_model_id: Optional[str] = "MyeongHo0621/Qwen2.5-3B-Korean-QLoRA"  # 4bit QLoRA, 60k 샘플
     hub_strategy: str = "end"  # 학습 완료 시만 업로드
     hub_token: Optional[str] = None  # None이면 ~/.huggingface/token 사용
 

@@ -55,7 +55,42 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 # 모듈 임포트
-from qwen_finetuning_3b import Qwen3BFineTuningConfig, Qwen3BFineTuner
+from qwen_finetuning_3b import Qwen3BFineTuner
+
+
+def load_config_from_checkpoint(checkpoint_path: str):
+    """Checkpoint에서 설정 자동 감지"""
+    import json
+    from pathlib import Path
+    
+    adapter_config_path = Path(checkpoint_path) / "adapter_config.json"
+    
+    if not adapter_config_path.exists():
+        logger.warning(f"⚠️  adapter_config.json 없음: {checkpoint_path}")
+        return None
+    
+    try:
+        with open(adapter_config_path, 'r') as f:
+            config = json.load(f)
+        
+        lora_r = config.get('r', 32)
+        lora_alpha = config.get('lora_alpha', 64)
+        lora_dropout = config.get('lora_dropout', 0.0)
+        
+        logger.info(f"📂 Checkpoint 설정 감지:")
+        logger.info(f"   LoRA r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}")
+        
+        # r 값으로 LoRA vs QLoRA 추정
+        if lora_r >= 64:
+            logger.info(f"   → QLoRA (4bit) 설정으로 추정")
+            return "qlora"
+        else:
+            logger.info(f"   → LoRA (8bit) 설정으로 추정")
+            return "lora"
+    
+    except Exception as e:
+        logger.warning(f"⚠️  Checkpoint 설정 읽기 실패: {e}")
+        return None
 
 
 def main():
@@ -66,6 +101,13 @@ def main():
         type=str,
         default=None,
         help="재개할 checkpoint 경로 (Hub 모델 ID 또는 로컬 경로). 예: MyeongHo0621/Qwen2.5-3B-Korean 또는 outputs/checkpoints/checkpoint-2500"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        choices=["lora", "qlora", "auto"],
+        default="auto",
+        help="설정 선택: lora (8bit), qlora (4bit), auto (checkpoint 자동 감지)"
     )
     args = parser.parse_args()
     
