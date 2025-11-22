@@ -21,6 +21,11 @@ def get_ft_llm_root() -> Path:
         if current.name == 'ft_llm':
             return current
         current = current.parent
+    
+    # ft_llm을 찾지 못한 경우, .setting 디렉토리 사용
+    if '.setting' in str(script_dir):
+        return Path('/home/work/.setting')
+    
     return script_dir.parent.parent
 
 @dataclass

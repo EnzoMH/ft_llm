@@ -58,6 +58,19 @@ if _src_dir not in sys.path:
 from qwen_finetuning_3b import Qwen3BFineTuner
 
 
+def get_config_class(config_type: str):
+    """config_type에 따라 적절한 Config 클래스 반환"""
+    if config_type == "lora":
+        from qwen_finetuning_3b.config_lora import Qwen3BFineTuningConfig
+        return Qwen3BFineTuningConfig
+    elif config_type == "qlora":
+        from qwen_finetuning_3b.config_qlora import Qwen3BFineTuningConfig
+        return Qwen3BFineTuningConfig
+    else:  # "auto" or default
+        from qwen_finetuning_3b.config import Qwen3BFineTuningConfig
+        return Qwen3BFineTuningConfig
+
+
 def load_config_from_checkpoint(checkpoint_path: str):
     """Checkpoint에서 설정 자동 감지"""
     import json
@@ -127,12 +140,30 @@ def main():
     print(f"\nGPU: {gpu_name}")
     print(f"메모리: {gpu_memory_gb:.1f}GB")
     
-    # 설정
-    config = Qwen3BFineTuningConfig()
+    # Config 타입 결정
+    config_type = args.config
+    if config_type == "auto" and args.resume_from_checkpoint:
+        # Checkpoint에서 자동 감지
+        detected_type = load_config_from_checkpoint(args.resume_from_checkpoint)
+        if detected_type:
+            config_type = detected_type
+            logger.info(f"✅ Checkpoint에서 {config_type} 설정 자동 감지")
+        else:
+            # 감지 실패 시 기본값 (QLoRA)
+            config_type = "qlora"
+            logger.info("⚠️  Checkpoint 설정 감지 실패, 기본값(qlora) 사용")
+    elif config_type == "auto":
+        # Checkpoint가 없으면 기본값 (QLoRA)
+        config_type = "qlora"
+    
+    # 설정 클래스 가져오기
+    ConfigClass = get_config_class(config_type)
+    config = ConfigClass()
     
     # Checkpoint 재개 정보 출력
     if args.resume_from_checkpoint:
         print(f"\n[ INFO ] Checkpoint에서 재개: {args.resume_from_checkpoint}")
+        print(f"[ INFO ] Config 타입: {config_type}")
     
     print(f"\n{'='*80}")
     print(" 설정 요약")
@@ -159,8 +190,8 @@ def main():
     finetuner = Qwen3BFineTuner(config)
     
     try:
-        # 1. 모델 로드
-        finetuner.load_model()
+        # 1. 모델 로드 (checkpoint가 있으면 adapter도 함께 로드)
+        finetuner.load_model(resume_from_checkpoint=args.resume_from_checkpoint)
         
         # 2. 데이터 로드
         dataset = finetuner.load_data()

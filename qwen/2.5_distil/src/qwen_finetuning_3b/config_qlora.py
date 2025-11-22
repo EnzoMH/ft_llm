@@ -21,6 +21,11 @@ def get_ft_llm_root() -> Path:
         if current.name == 'ft_llm':
             return current
         current = current.parent
+    
+    # ft_llm을 찾지 못한 경우, .setting 디렉토리 사용
+    if '.setting' in str(script_dir):
+        return Path('/home/work/.setting')
+    
     return script_dir.parent.parent
 
 @dataclass
@@ -37,7 +42,7 @@ class Qwen3BFineTuningConfig:
     # 데이터 (60k 샘플 - 시간 제약)
     korean_data_dir: str = field(default_factory=lambda: str(get_ft_llm_root() / "data"))
     data_files: List[str] = field(default_factory=lambda: ["smol_koreantalk_full.jsonl"])
-    max_samples: Optional[int] = 60000  # 60k (6시간 제약)
+    max_samples: Optional[int] = 200000  # 60만 중 20만 샘플 사용
     
     # 출력
     output_dir: str = field(default_factory=lambda: str(Path(__file__).resolve().parent.parent.parent / "outputs" / "checkpoints"))
@@ -49,7 +54,7 @@ class Qwen3BFineTuningConfig:
     lora_dropout: float = 0.05  # 과적합 방지
     
     # 학습 설정
-    num_train_epochs: int = 1  # 60k × 1 epoch (시간 제약)
+    num_train_epochs: int = 3  # 200k 샘플 × 3 epochs = 600k 총 학습
     per_device_train_batch_size: int = 32  # QLoRA는 32 가능
     gradient_accumulation_steps: int = 4  # 효과적 배치: 128
     learning_rate: float = 2e-4  # 더 높은 LR (plateau 탈출)

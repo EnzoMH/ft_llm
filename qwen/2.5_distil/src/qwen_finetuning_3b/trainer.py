@@ -153,14 +153,20 @@ class Qwen3BFineTuner:
         self.model = None
         self.tokenizer = None
     
-    def load_model(self):
-        """모델 로드"""
+    def load_model(self, resume_from_checkpoint: Optional[str] = None):
+        """모델 로드
+        
+        Args:
+            resume_from_checkpoint: 재개할 checkpoint 경로 (Hub 모델 ID 또는 로컬 경로)
+        """
         logger.info("="*80)
         logger.info("Qwen2.5-3B-Instruct 모델 로딩")
         logger.info("="*80)
         logger.info(f"모델: {self.config.base_model}")
         logger.info(f"Max Seq Length: {self.config.max_seq_length}")
         logger.info(f"8bit: {self.config.load_in_8bit}, 4bit: {self.config.load_in_4bit}")
+        if resume_from_checkpoint:
+            logger.info(f"Checkpoint: {resume_from_checkpoint}")
         logger.info("="*80)
         
         log_system_resources(logger, "모델 로드 전")
@@ -221,27 +227,111 @@ class Qwen3BFineTuner:
         
         logger.info(f"[ INFO ] Vocab size: {len(self.tokenizer):,}")
         
-        # LoRA 적용
-        logger.info("[ INFO ] LoRA 설정 적용 중...")
-        logger.info(f"  LoRA r={self.config.lora_r}, alpha={self.config.lora_alpha}")
+        # Checkpoint에서 adapter 로드 또는 새로운 LoRA 적용
+        checkpoint_adapter_loaded = False
+        if resume_from_checkpoint:
+            # Hub 모델 ID인 경우 다운로드
+            checkpoint_path = resume_from_checkpoint
+            if "/" in resume_from_checkpoint and not os.path.exists(resume_from_checkpoint):
+                logger.info(f"[ INFO ] Hub에서 checkpoint 다운로드 중: {resume_from_checkpoint}")
+                try:
+                    checkpoint_dir = os.path.join(self.config.output_dir, "resume_checkpoint")
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    
+                    snapshot_download(
+                        repo_id=resume_from_checkpoint,
+                        local_dir=checkpoint_dir,
+                        token=self.config.hub_token or os.getenv("HF_TOKEN"),
+                    )
+                    checkpoint_path = checkpoint_dir
+                    logger.info(f"[ COMPLETE ] Checkpoint 다운로드 완료: {checkpoint_path}")
+                except Exception as e:
+                    logger.error(f"[ ERROR ] Checkpoint 다운로드 실패: {e}")
+                    checkpoint_path = None
+            
+            # Adapter 로드 시도 - PEFT 대신 adapter 가중치만 로드
+            if checkpoint_path and os.path.exists(checkpoint_path):
+                # 루트 디렉토리에서 adapter 찾기
+                adapter_path = os.path.join(checkpoint_path, "adapter_model.safetensors")
+                
+                # final 서브디렉토리 확인
+                final_path = os.path.join(checkpoint_path, "final")
+                if os.path.exists(final_path):
+                    final_adapter_path = os.path.join(final_path, "adapter_model.safetensors")
+                    if os.path.exists(final_adapter_path):
+                        adapter_path = final_adapter_path
+                        checkpoint_path = final_path
+                        logger.info(f"[ INFO ] final 디렉토리에서 adapter 발견: {final_path}")
+                
+                if os.path.exists(adapter_path):
+                    logger.info(f"[ INFO ] Checkpoint의 adapter config 확인: {checkpoint_path}")
+                    logger.info(f"[ WARNING ] Hub checkpoint의 adapter는 학습 중에 로드됩니다.")
+                    logger.info(f"[ INFO ] 먼저 새로운 LoRA를 적용한 후, adapter 가중치를 로드합니다.")
+                    # checkpoint_adapter_loaded는 False로 유지하여 새 LoRA 적용
+                    # train() 메소드에서 가중치를 로드함
         
-        self.model = FastLanguageModel.get_peft_model(
-            self.model,
-            r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
-            target_modules=[
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj"
-            ],
-            bias="none",
-            use_gradient_checkpointing=self.config.use_gradient_checkpointing,
-            random_state=42,
-            use_rslora=False,
-            loftq_config=None
-        )
-        
-        logger.info("[ COMPLETE ] LoRA 적용 완료")
+        # Checkpoint adapter가 없거나 또는 새로운 LoRA 적용 필요
+        if not checkpoint_adapter_loaded:
+            logger.info("[ INFO ] LoRA 설정 적용 중...")
+            logger.info(f"  LoRA r={self.config.lora_r}, alpha={self.config.lora_alpha}")
+            
+            self.model = FastLanguageModel.get_peft_model(
+                self.model,
+                r=self.config.lora_r,
+                lora_alpha=self.config.lora_alpha,
+                lora_dropout=self.config.lora_dropout,
+                target_modules=[
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"
+                ],
+                bias="none",
+                use_gradient_checkpointing=self.config.use_gradient_checkpointing,
+                random_state=42,
+                use_rslora=False,
+                loftq_config=None
+            )
+            
+            logger.info("[ COMPLETE ] LoRA 적용 완료")
+            
+            # Hub checkpoint의 adapter 가중치 로드 (구조는 동일하므로)
+            if resume_from_checkpoint:
+                checkpoint_path_to_check = resume_from_checkpoint
+                if "/" in resume_from_checkpoint and not os.path.exists(resume_from_checkpoint):
+                    checkpoint_path_to_check = os.path.join(self.config.output_dir, "resume_checkpoint")
+                
+                # final 디렉토리 확인
+                final_path = os.path.join(checkpoint_path_to_check, "final")
+                if os.path.exists(final_path):
+                    adapter_safetensors = os.path.join(final_path, "adapter_model.safetensors")
+                else:
+                    adapter_safetensors = os.path.join(checkpoint_path_to_check, "adapter_model.safetensors")
+                
+                if os.path.exists(adapter_safetensors):
+                    try:
+                        from safetensors.torch import load_file
+                        logger.info(f"[ INFO ] Adapter 가중치 로드 중: {adapter_safetensors}")
+                        
+                        # Adapter 가중치 로드
+                        adapter_weights = load_file(adapter_safetensors)
+                        
+                        # 현재 모델의 state dict 가져오기
+                        model_state_dict = self.model.state_dict()
+                        
+                        # Adapter 가중치만 업데이트
+                        loaded_keys = []
+                        for key in adapter_weights.keys():
+                            if key in model_state_dict:
+                                model_state_dict[key] = adapter_weights[key]
+                                loaded_keys.append(key)
+                        
+                        # 업데이트된 state dict 로드
+                        self.model.load_state_dict(model_state_dict, strict=False)
+                        
+                        logger.info(f"[ COMPLETE ] Adapter 가중치 로드 완료: {len(loaded_keys)}개 키")
+                        logger.info(f"[ INFO ] 로드된 가중치 예시: {loaded_keys[:3]}")
+                    except Exception as e:
+                        logger.warning(f"[ WARNING ] Adapter 가중치 로드 실패: {e}")
+                        logger.info("[ INFO ] 새로운 가중치로 학습을 시작합니다.")
         
         log_system_resources(logger, "LoRA 적용 후")
         
@@ -411,6 +501,28 @@ class Qwen3BFineTuner:
         Returns:
             str: 최종 모델 저장 경로
         """
+        # Checkpoint에서 adapter 로드 (trainer_state.json이 없는 경우)
+        if resume_from_checkpoint:
+            # Hub 모델 ID인 경우 다운로드
+            if "/" in resume_from_checkpoint and not os.path.exists(resume_from_checkpoint):
+                logger.info(f"[ INFO ] Hub에서 checkpoint 다운로드 중: {resume_from_checkpoint}")
+                try:
+                    checkpoint_dir = os.path.join(self.config.output_dir, "resume_checkpoint")
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    
+                    snapshot_download(
+                        repo_id=resume_from_checkpoint,
+                        local_dir=checkpoint_dir,
+                        token=self.config.hub_token or os.getenv("HF_TOKEN"),
+                    )
+                    resume_from_checkpoint = checkpoint_dir
+                    logger.info(f"[ COMPLETE ] Checkpoint 다운로드 완료: {resume_from_checkpoint}")
+                except Exception as e:
+                    logger.error(f"[ ERROR ] Checkpoint 다운로드 실패: {e}")
+                    resume_from_checkpoint = None
+            
+            # Adapter 가중치는 이미 load_model()에서 로드되었음
+            logger.info("[ INFO ] Adapter 가중치는 load_model()에서 로드되었습니다.")
         logger.info("="*80)
         logger.info(" Qwen2.5-3B 멀티턴 대화 파인튜닝")
         logger.info(f" Run: {self.config.run_name}")
@@ -473,6 +585,10 @@ class Qwen3BFineTuner:
             bf16=is_bfloat16_supported(),
             fp16=not is_bfloat16_supported(),
             optim="adamw_8bit",
+            
+            # Gradient checkpointing: Unsloth가 자체적으로 처리하므로 False로 설정
+            # PEFT adapter 로드 후 _gradient_checkpointing_func 에러 방지
+            gradient_checkpointing=False,
             
             # 로깅/저장
             logging_steps=self.config.logging_steps,
@@ -579,8 +695,13 @@ class Qwen3BFineTuner:
                         resume_from_checkpoint = checkpoint_path[1]
                         logger.info(f"[ COMPLETE ] Checkpoint 다운로드 완료: {resume_from_checkpoint}")
                     else:
-                        # checkpoint 디렉토리가 없으면 루트를 사용 (adapter 파일이 있는 경우)
-                        if os.path.exists(os.path.join(checkpoint_dir, "adapter_model.safetensors")):
+                        # final 디렉토리 확인
+                        final_dir = os.path.join(checkpoint_dir, "final")
+                        if os.path.exists(final_dir) and os.path.exists(os.path.join(final_dir, "adapter_model.safetensors")):
+                            resume_from_checkpoint = final_dir
+                            logger.info(f"[ COMPLETE ] final 디렉토리에서 adapter 발견: {resume_from_checkpoint}")
+                        # 루트 디렉토리에서 adapter 확인
+                        elif os.path.exists(os.path.join(checkpoint_dir, "adapter_model.safetensors")):
                             resume_from_checkpoint = checkpoint_dir
                             logger.info(f"[ COMPLETE ] Checkpoint 다운로드 완료: {resume_from_checkpoint}")
                         else:
@@ -592,21 +713,33 @@ class Qwen3BFineTuner:
                     resume_from_checkpoint = None
             
             if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
-                logger.info(f"[ INFO ] Checkpoint에서 재개: {resume_from_checkpoint}")
+                # trainer_state.json이 있는지 확인
+                trainer_state_path = os.path.join(resume_from_checkpoint, "trainer_state.json")
                 
-                # Learning Rate 재설정을 위해 옵티마이저/스케줄러 상태 파일만 삭제
-                # trainer_state.json은 체크포인트 재개에 필수이므로 유지
-                optimizer_path = os.path.join(resume_from_checkpoint, "optimizer.pt")
-                scheduler_path = os.path.join(resume_from_checkpoint, "scheduler.pt")
-                
-                if os.path.exists(optimizer_path):
-                    logger.info("[ INFO ] 옵티마이저 상태 삭제 (새 Learning Rate 적용)")
-                    os.remove(optimizer_path)
-                if os.path.exists(scheduler_path):
-                    logger.info("[ INFO ] 스케줄러 상태 삭제 (새 Learning Rate 적용)")
-                    os.remove(scheduler_path)
-                
-                trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+                if os.path.exists(trainer_state_path):
+                    logger.info(f"[ INFO ] Checkpoint에서 재개: {resume_from_checkpoint}")
+                    
+                    # Learning Rate 재설정을 위해 옵티마이저/스케줄러 상태 파일만 삭제
+                    # trainer_state.json은 체크포인트 재개에 필수이므로 유지
+                    optimizer_path = os.path.join(resume_from_checkpoint, "optimizer.pt")
+                    scheduler_path = os.path.join(resume_from_checkpoint, "scheduler.pt")
+                    
+                    if os.path.exists(optimizer_path):
+                        logger.info("[ INFO ] 옵티마이저 상태 삭제 (새 Learning Rate 적용)")
+                        os.remove(optimizer_path)
+                    if os.path.exists(scheduler_path):
+                        logger.info("[ INFO ] 스케줄러 상태 삭제 (새 Learning Rate 적용)")
+                        os.remove(scheduler_path)
+                    
+                    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+                else:
+                    # trainer_state.json이 없으면 adapter는 이미 load_model()에서 로드되었으므로 처음부터 학습 시작
+                    logger.info(f"[ INFO ] Checkpoint에 trainer_state.json이 없습니다.")
+                    logger.info(f"[ INFO ] LoRA adapter는 이미 로드되었습니다. 처음부터 학습을 시작합니다.")
+                    logger.info(f"[ INFO ] Checkpoint 경로: {resume_from_checkpoint}")
+                    
+                    # 처음부터 학습 시작
+                    trainer.train()
             else:
                 logger.info("[ INFO ] 처음부터 학습 시작")
                 trainer.train()

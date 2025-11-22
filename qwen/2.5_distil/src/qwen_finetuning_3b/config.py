@@ -22,6 +22,11 @@ def get_ft_llm_root() -> Path:
             return current
         current = current.parent
     
+    # ft_llm을 찾지 못한 경우, .setting 디렉토리 사용
+    # /home/work/.setting/qwen/2.5_distil -> /home/work/.setting
+    if '.setting' in str(script_dir):
+        return Path('/home/work/.setting')
+    
     return script_dir.parent.parent
 
 @dataclass
@@ -38,7 +43,7 @@ class Qwen3BFineTuningConfig:
     # 데이터 (smol_koreantalk_full.jsonl 단일 파일 사용)
     korean_data_dir: str = field(default_factory=lambda: str(get_ft_llm_root() / "data"))
     data_files: List[str] = field(default_factory=lambda: ["smol_koreantalk_full.jsonl"])
-    max_samples: Optional[int] = 60000  # None → 60000 (6시간 제약, 1 epoch 학습)
+    max_samples: Optional[int] = 200000  # 60만 중 20만 샘플 사용
     
     # 출력
     output_dir: str = field(default_factory=lambda: str(Path(__file__).resolve().parent.parent.parent / "outputs" / "checkpoints"))
@@ -50,7 +55,7 @@ class Qwen3BFineTuningConfig:
     lora_dropout: float = 0.05  # 0 → 0.05 (과적합 방지, 일반화 성능 향상)
     
     # 학습 설정 (H100 80GB 최적화)
-    num_train_epochs: int = 1  # 3 → 1 (60k 샘플 × 1 epoch, 6시간 제약)
+    num_train_epochs: int = 3  # 200k 샘플 × 3 epochs = 600k 총 학습
     per_device_train_batch_size: int = 32  # 16 → 32 (QLoRA 4bit, VRAM 여유 활용)
     gradient_accumulation_steps: int = 4  # 8 → 4 (효과적 배치: 128 유지)
     learning_rate: float = 2e-4  # 1e-4 → 2e-4 (plateau 탈출, 더 공격적 학습)

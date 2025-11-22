@@ -44,11 +44,11 @@ class SOLARFineTuningConfig:
     model_name: str = "SOLAR-10.7B-Korean-Instruct"
     
     # 데이터
-    data_path: str = "/home/work/tesseract/korean_large_data/korean_large_dataset.json"  # 191K 대규모 데이터
-    max_samples: Optional[int] = 100000  # 100K로 샘플링 (과적합 방지 + 속도 향상)
+    data_path: str = "/home/work/.setting/data/smol_koreantalk_full.jsonl"  # Qwen과 동일한 데이터
+    max_samples: Optional[int] = 200000  # 60만 중 20만 샘플 사용
     
     # 출력
-    output_dir: str = "/home/work/tesseract/solar-korean-quality-output"
+    output_dir: str = "/home/work/.setting/solar/outputs/checkpoints"
     
     # LoRA 설정 (자연스러운 응답을 위한 최적화)
     lora_r: int = 64
@@ -57,7 +57,7 @@ class SOLARFineTuningConfig:
     lora_target_modules: List[str] = None
     
     # 훈련 설정 (자연스러운 LLM을 위한 최적화)
-    num_train_epochs: int = 2  # 과적합 방지 (100K 데이터 × 2 에포크 = 적절)
+    num_train_epochs: int = 3  # 200k 샘플 × 3 epochs = 600k 총 학습
     per_device_train_batch_size: int = 8  # 속도 향상 + 안정적 학습
     gradient_accumulation_steps: int = 2  # 효과적 배치 = 16 (동일)
     learning_rate: float = 1e-4  # 보수적 학습률 (2e-4 → 1e-4) - 안정적 학습
@@ -76,10 +76,16 @@ class SOLARFineTuningConfig:
     dataloader_num_workers: int = 4
     
     # 저장
-    save_steps: int = 100
-    save_total_limit: int = 20
-    logging_steps: int = 20
-    eval_steps: int = 100
+    save_steps: int = 200
+    save_total_limit: int = 2
+    logging_steps: int = 10
+    eval_steps: int = 200
+    
+    # HuggingFace Hub 업로드
+    push_to_hub: bool = True
+    hub_model_id: Optional[str] = "MyeongHo0621/SOLAR-10.7B-Korean-Instruct"
+    hub_strategy: str = "end"
+    hub_token: Optional[str] = None
     
     def __post_init__(self):
         if self.lora_target_modules is None:
@@ -98,14 +104,19 @@ class SOLARFineTuner:
         self.tokenizer = None
         
     def load_data(self) -> Dataset:
-        """로컬 데이터 로드 및 검증"""
+        """로컬 데이터 로드 및 검증 (JSONL 형식)"""
         logger.info(f"데이터 로딩: {self.config.data_path}")
         
         if not os.path.exists(self.config.data_path):
             raise FileNotFoundError(f"데이터 파일 없음: {self.config.data_path}")
         
+        # JSONL 형식 읽기
+        data = []
         with open(self.config.data_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            for line in f:
+                line = line.strip()
+                if line:
+                    data.append(json.loads(line))
         
         logger.info(f"원본 데이터: {len(data):,}개")
         
@@ -382,7 +393,13 @@ class SOLARFineTuner:
             optim="adamw_torch_fused",
             max_grad_norm=1.0,
             save_safetensors=True,
-            seed=42
+            seed=42,
+            
+            # Hub 업로드
+            push_to_hub=self.config.push_to_hub,
+            hub_model_id=self.config.hub_model_id,
+            hub_strategy=self.config.hub_strategy,
+            hub_token=self.config.hub_token
         )
         
         # Data collator
